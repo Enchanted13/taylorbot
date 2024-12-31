@@ -146,18 +146,18 @@ public class SlashCommandHandler(
                     {
                         if (submit.UserId == $"{context.User.Id}")
                         {
-                            modalInteractionHandler.RemoveCallback(submit.CustomId);
+                            modalInteractionHandler.RemoveCallback(submit.CustomId.RawId);
 
                             try
                             {
                                 var result = await modal.SubmitAction(submit);
                                 var buttons = CreateAndBindButtons(submit, result, $"{context.User.Id}");
-                                await CreateInteractionClient().EditOriginalResponseAsync(submit, new(result.Content, buttons, IsPrivate: createModal.IsPrivateResponse));
+                                await CreateInteractionClient().EditOriginalResponseAsync(submit, message: new(result.Content, buttons, IsPrivate: createModal.IsPrivateResponse));
                             }
                             catch (Exception e)
                             {
                                 logger.LogError(e, "Unhandled exception in modal submit {Id} action:", submit.Id);
-                                await CreateInteractionClient().EditOriginalResponseAsync(submit, new(
+                                await CreateInteractionClient().EditOriginalResponseAsync(submit, message: new(
                                     EmbedFactory.CreateError("Oops, an unknown error occurred. Sorry about that. 😕")
                                 ));
                             }
@@ -405,93 +405,104 @@ public class SlashCommandHandler(
         return Activator.CreateInstance(command.OptionType, args.ToArray()) ?? throw new InvalidOperationException();
     }
 
-    private IReadOnlyList<Button> CreateAndBindButtons(IInteraction interaction, MessageResult m, string authorId)
+    private List<Button> CreateAndBindButtons(IInteraction interaction, MessageResult m, string authorId)
     {
         if (m.Buttons?.Buttons.Count > 0)
         {
-            var buttons = m.Buttons.Buttons
-                .Select(b => b with { Button = b.Button with { Id = $"{Guid.NewGuid():N}-{b.Button.Id}" } })
-                .ToList();
-
-            RateLimiter followUpLimiter = new ConcurrencyLimiter(
-                new ConcurrencyLimiterOptions { PermitLimit = 1, QueueLimit = 100 });
-
-            foreach (var button in buttons)
+            switch (m.Buttons.Settings)
             {
-                messageComponentHandler.AddCallback(button.Button.Id, async component =>
-                {
-                    if (button.AllowNonAuthor || component.UserId == authorId)
+                case TemporaryButtonSettings temporary:
                     {
-                        try
+                        var buttons = m.Buttons.Buttons
+                            .Select(b => b with { Button = b.Button with { Id = $"{Guid.NewGuid():N}-{b.Button.Id}" } })
+                            .ToList();
+
+                        RateLimiter followUpLimiter = new ConcurrencyLimiter(
+                            new ConcurrencyLimiterOptions { PermitLimit = 1, QueueLimit = 100 });
+
+                        foreach (var button in buttons)
                         {
-                            var action = await button.OnClick(component.UserId);
-                            switch (action)
+                            messageComponentHandler.AddCallback(button.Button.Id, async component =>
                             {
-                                case UpdateMessage update:
-                                    RemoveCallbacks(buttons);
-                                    var newButtons = CreateAndBindButtons(interaction, update.NewMessage, authorId);
-                                    await CreateInteractionClient().EditOriginalResponseAsync(component, new(update.NewMessage.Content, newButtons));
-                                    break;
-
-                                case UpdateMessageContent update:
-                                    await CreateInteractionClient().EditOriginalResponseAsync(component, new(update.Content, buttons.Select(b => b.Button).ToList()));
-                                    if (update.Response != null)
+                                if (button.AllowNonAuthor || component.UserId == authorId)
+                                {
+                                    try
                                     {
-                                        using var lease = await followUpLimiter.AcquireAsync();
-                                        if (lease.IsAcquired)
+                                        var action = await button.OnClick(component.UserId);
+                                        switch (action)
                                         {
-                                            // Throttle to avoid Discord rate limit
-                                            await Task.Delay(TimeSpan.FromMilliseconds(250));
+                                            case UpdateMessage update:
+                                                RemoveCallbacks(buttons);
+                                                var newButtons = CreateAndBindButtons(interaction, update.NewMessage, authorId);
+                                                await CreateInteractionClient().EditOriginalResponseAsync(component, message: new(update.NewMessage.Content, newButtons));
+                                                break;
 
-                                            try
-                                            {
-                                                await CreateInteractionClient().SendFollowupResponseAsync(component,
-                                                    new(update.Response.Message.Content, IsPrivate: update.Response.IsPrivate));
-                                            }
-                                            catch (Exception e)
-                                            {
-                                                logger.LogError(e, "Unhandled exception trying to send followup response to button {ButtonId} action:", button.Button.Id);
-                                            }
+                                            case UpdateMessageContent update:
+                                                await CreateInteractionClient().EditOriginalResponseAsync(component, message: new(update.Content, buttons.Select(b => b.Button).ToList()));
+                                                if (update.Response != null)
+                                                {
+                                                    using var lease = await followUpLimiter.AcquireAsync();
+                                                    if (lease.IsAcquired)
+                                                    {
+                                                        // Throttle to avoid Discord rate limit
+                                                        await Task.Delay(TimeSpan.FromMilliseconds(250));
+
+                                                        try
+                                                        {
+                                                            await CreateInteractionClient().SendFollowupResponseAsync(component,
+                                                                new(update.Response.Message.Content, IsPrivate: update.Response.IsPrivate));
+                                                        }
+                                                        catch (Exception e)
+                                                        {
+                                                            logger.LogError(e, "Unhandled exception trying to send follow up response to button {ButtonId} action:", button.Button.Id);
+                                                        }
+                                                    }
+                                                }
+                                                break;
+
+                                            case DeleteMessage:
+                                                RemoveCallbacks(buttons);
+                                                await CreateInteractionClient().DeleteOriginalResponseAsync(component);
+                                                break;
+
+                                            case IgnoreClick:
+                                                break;
+
+                                            default: throw new InvalidOperationException();
                                         }
                                     }
-                                    break;
-
-                                case DeleteMessage:
-                                    RemoveCallbacks(buttons);
-                                    await CreateInteractionClient().DeleteOriginalResponseAsync(component);
-                                    break;
-
-                                case IgnoreClick:
-                                    break;
-
-                                default: throw new InvalidOperationException();
-                            }
+                                    catch (Exception e)
+                                    {
+                                        logger.LogError(e, "Unhandled exception in button {ButtonId} action:", button.Button.Id);
+                                        await CreateInteractionClient().EditOriginalResponseAsync(component, message: new(
+                                            new(EmbedFactory.CreateError("Oops, an unknown error occurred. Sorry about that. 😕")),
+                                            []
+                                        ));
+                                    }
+                                }
+                            });
                         }
-                        catch (Exception e)
+
+                        _ = Task.Run(async () => await taskExceptionLogger.LogOnError(async () =>
                         {
-                            logger.LogError(e, "Unhandled exception in button {ButtonId} action:", button.Button.Id);
-                            await CreateInteractionClient().EditOriginalResponseAsync(component, new(
-                                new(EmbedFactory.CreateError("Oops, an unknown error occurred. Sorry about that. 😕")),
-                                []
-                            ));
-                        }
+                            await Task.Delay(temporary.ListenToClicksFor ?? TimeSpan.FromMinutes(10));
+                            RemoveCallbacks(buttons);
+                            followUpLimiter.Dispose();
+
+                            var result = temporary.OnEnded != null ? await temporary.OnEnded() : null;
+                            MessageResponse updated = result != null ? new(result.Content) : new(m.Content, []);
+
+                            await CreateInteractionClient().EditOriginalResponseAsync(interaction, updated);
+                        }, nameof(CreateAndBindButtons)));
+
+                        return buttons.Select(b => b.Button).ToList();
                     }
-                });
+
+                case PermanentButtonSettings permanent:
+                    return m.Buttons.Buttons.Select(b => b.Button).ToList();
+
+                default: throw new NotImplementedException();
             }
-
-            _ = Task.Run(async () => await taskExceptionLogger.LogOnError(async () =>
-            {
-                await Task.Delay(m.Buttons.ListenToClicksFor ?? TimeSpan.FromMinutes(10));
-                RemoveCallbacks(buttons);
-                followUpLimiter.Dispose();
-
-                var result = m.Buttons.OnEnded != null ? await m.Buttons.OnEnded() : null;
-                MessageResponse updated = result != null ? new(result.Content) : new(m.Content, []);
-
-                await CreateInteractionClient().EditOriginalResponseAsync(interaction, updated);
-            }, nameof(CreateAndBindButtons)));
-
-            return buttons.Select(b => b.Button).ToList();
         }
         else
         {

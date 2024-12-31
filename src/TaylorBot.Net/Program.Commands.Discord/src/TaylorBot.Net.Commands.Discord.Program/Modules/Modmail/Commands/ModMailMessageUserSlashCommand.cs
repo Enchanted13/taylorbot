@@ -18,7 +18,7 @@ public class ModMailMessageUserSlashCommand(Lazy<ITaylorBotClient> client, ModMa
 
     public record Options(ParsedMemberNotAuthorAndBot user);
 
-    private static readonly Color EmbedColor = new(255, 255, 240);
+    public static readonly Color EmbedColor = new(255, 255, 240);
 
     public ValueTask<Command> GetCommandAsync(RunContext context, Options options)
     {
@@ -50,39 +50,13 @@ public class ModMailMessageUserSlashCommand(Lazy<ITaylorBotClient> client, ModMa
                         .WithColor(EmbedColor)
                         .WithTitle("Message from the moderation team")
                         .WithDescription(messageContent)
-                        .WithFooter("Reply with /mod mail message-mods")
+                        .WithFooter("Reply with /modmail message-mods")
                     .Build();
 
                     return new(MessageResult.CreatePrompt(
                         new([embed, EmbedFactory.CreateWarning($"Are you sure you want to send the above message to {guildUser.FormatTagAndMention()}?")]),
-                        confirm: async () => new(await SendAsync(guildUser, embed))
+                        confirm: async () => new(await SendAsync(guildUser, embed, context))
                     ));
-                }
-
-                async ValueTask<Embed> SendAsync(IGuildUser user, Embed embed)
-                {
-                    try
-                    {
-                        await user.SendMessageAsync(embed: embed);
-                    }
-                    catch (HttpException e) when (e.DiscordCode == DiscordErrorCode.CannotSendMessageToUser)
-                    {
-                        return EmbedFactory.CreateError(
-                            $"""
-                            I couldn't send this message to {user.FormatTagAndMention()} because their DM settings won't allow it. ❌
-                            The user must have 'Allow direct messages from server members' enabled and must not have TaylorBot blocked.
-                            """);
-                    }
-
-                    var wasLogged = await modMailChannelLogger.TrySendModMailLogAsync(user.Guild, context.User, new(user), logEmbed =>
-                        logEmbed
-                            .WithColor(EmbedColor)
-                            .WithTitle("Message")
-                            .WithDescription(embed.Description)
-                            .WithFooter("Mod mail sent", iconUrl: modMailOptions.CurrentValue.SentLogEmbedFooterIconUrl)
-                    );
-
-                    return modMailChannelLogger.CreateResultEmbed(context, wasLogged, $"Message sent to {user.FormatTagAndMention()} ✉️");
                 }
             },
             Preconditions: [
@@ -90,5 +64,31 @@ public class ModMailMessageUserSlashCommand(Lazy<ITaylorBotClient> client, ModMa
                 new UserHasPermissionOrOwnerPrecondition(GuildPermission.BanMembers),
             ]
         ));
+    }
+
+    private async ValueTask<Embed> SendAsync(IGuildUser user, Embed embed, RunContext context)
+    {
+        try
+        {
+            await user.SendMessageAsync(embed: embed);
+        }
+        catch (HttpException e) when (e.DiscordCode == DiscordErrorCode.CannotSendMessageToUser)
+        {
+            return EmbedFactory.CreateError(
+                $"""
+                I couldn't send this message to {user.FormatTagAndMention()} because their DM settings won't allow it ❌
+                The user must have 'Allow direct messages from server members' enabled and must not have TaylorBot blocked ⚙️
+                """);
+        }
+
+        var wasLogged = await modMailChannelLogger.TrySendModMailLogAsync(user.Guild, context.User, new(user), logEmbed =>
+            logEmbed
+                .WithColor(EmbedColor)
+                .WithTitle("Message")
+                .WithDescription(embed.Description)
+                .WithFooter("Mod mail sent", iconUrl: modMailOptions.CurrentValue.SentLogEmbedFooterIconUrl)
+        );
+
+        return modMailChannelLogger.CreateResultEmbed(context, wasLogged, $"Message sent to {user.FormatTagAndMention()} ✉️");
     }
 }

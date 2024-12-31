@@ -70,6 +70,8 @@ public class TaylorBotClient : ITaylorBotClient
         {
             _rawEventsHandler.HandleRawEvent(shard, "INTERACTION_CREATE", async (payload) =>
             {
+                _logger.LogDebug("Received interaction: {Interaction}", payload);
+
                 var interaction = JsonSerializer.Deserialize<Interaction>(payload);
                 ArgumentNullException.ThrowIfNull(interaction);
 

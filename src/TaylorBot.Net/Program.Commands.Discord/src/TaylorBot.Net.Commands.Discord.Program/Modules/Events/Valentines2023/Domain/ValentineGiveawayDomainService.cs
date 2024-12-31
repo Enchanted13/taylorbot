@@ -110,7 +110,7 @@ public class ValentineGiveawayDomainService(
                                 {
                                     _giveaway.Entrants.Add(new(component.UserId));
 
-                                    await interactionResponseClient.EditOriginalResponseAsync(component, new(
+                                    await interactionResponseClient.EditOriginalResponseAsync(component, message: new(
                                         new([BuildGiveawayEmbed()], Content: _giveaway?.OriginalMessage?.Content ?? ""),
                                         [new Button("enter-giveaway", ButtonStyle.Primary, "Enter giveaway", "🎉")]
                                     ));
